@@ -57,6 +57,7 @@ async function get_article(nhm, url, category) {
     });
 
     return {
+        "url": url,
         "title": document.getElementsByTagName('title')[0].text,
         "body": nhm.translate(body),
         "categories": category ? category.split(',') : null
@@ -64,8 +65,12 @@ async function get_article(nhm, url, category) {
 }
 
 async function create_notion_page(notion, article) {
+    let tags = [];
     let body = markdownToBlocks(article.body);
     body = await Promise.all(body.flatMap(async object => object.type === 'image' ? await uploadS3(object) : object));
+    if (article.categories) {
+        article.categories.map(category => tags.push({"name": category}));
+    }
     const response = await notion.pages.create({
         parent: {
             database_id: process.env.NOTION_DB_TOKEN,
@@ -80,10 +85,12 @@ async function create_notion_page(notion, article) {
                     },
                 ],
             },
+            Tags: {
+                multi_select: tags
+            }
         },
         children: body
     });
-    console.log(response);
 }
 
 async function uploadS3(block) {
