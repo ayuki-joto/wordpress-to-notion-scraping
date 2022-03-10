@@ -55,42 +55,55 @@ async function get_article(nhm, url, category) {
     let body = items.reduce((prev, current) => {
         return prev + current;
     });
-
+    let cover = await parseOgpImage([...document.head.querySelectorAll('meta')]);
     return {
         "url": url,
         "title": document.getElementsByTagName('title')[0].text,
         "body": nhm.translate(body),
-        "categories": category ? category.split(',') : null
+        "categories": category ? category.split(',') : null,
+        "cover": cover
     };
 }
 
 async function create_notion_page(notion, article) {
     let tags = [];
-    let body = markdownToBlocks(article.body);
-    body = await Promise.all(body.flatMap(async object => object.type === 'image' ? await uploadS3(object) : object));
-    if (article.categories) {
-        article.categories.map(category => tags.push({"name": category}));
-    }
-    const response = await notion.pages.create({
-        parent: {
-            database_id: process.env.NOTION_DB_TOKEN,
-        },
-        properties: {
-            Name: {
-                title: [
-                    {
-                        text: {
-                            content: article.title,
-                        },
-                    },
-                ],
+    try {
+        let body = markdownToBlocks(article.body);
+        body = await Promise.all(body.flatMap(async object => object.type === 'image' ? await uploadS3(object) : object));
+        if (article.categories) {
+            article.categories.map(category => tags.push({"name": category}));
+        }
+
+        const response = await notion.pages.create({
+            parent: {
+                database_id: process.env.NOTION_DB_TOKEN,
             },
-            Tags: {
-                multi_select: tags
-            }
-        },
-        children: body
-    });
+            cover: {
+                type: "external",
+                external: {
+                    url: article.cover
+                }
+            },
+            properties: {
+                Name: {
+                    title: [
+                        {
+                            text: {
+                                content: article.title,
+                            },
+                        },
+                    ],
+                },
+                Tags: {
+                    multi_select: tags
+                }
+            },
+            children: body
+        });
+    } catch (exception) {
+        console.log(article.url);
+        console.log(exception);
+    }
 }
 
 async function uploadS3(block) {
@@ -136,5 +149,43 @@ async function uploadS3(block) {
             console.error('ERROR:', err);
             return block;
         }
+    }
+}
+
+async function parseOgpImage(allMetaTag) {
+    const ogp = allMetaTag
+        .filter((element) => {
+            const property = element.getAttribute("property")?.trim();
+            return !(!property || property !== 'og:image');
+        });
+    if (ogp[0]) {
+        const src = ogp[0].getAttribute("content");
+        const params = {
+            Bucket: process.env.S3_BUCKET_NAME,
+        }
+        try {
+            const response = await fetch(src)
+            params['ContentType'] = response.headers.get("content-type") ?? undefined;
+            params['ContentLength'] = response.headers.get("content-length") != null
+                ? Number(response.headers.get("content-length"))
+                : undefined;
+            params['Body'] = response.body;
+            params['Key'] = [process.env.S3_COVER_PREFIX, uuid(), path.extname(src)].join('');
+            await s3.putObject(params)
+                .then(() => {
+                    return [process.env.CLOUD_FRONT_URL, params['Key']].join('/');
+                }).catch(err => {
+                    console.error('ERROR:', err);
+                    console.log('hay');
+                    return null;
+                });
+            return [process.env.CLOUD_FRONT_URL, params['Key']].join('/');
+        } catch (err) {
+            console.error('ERROR:', err);
+            console.log('hay');
+            return null;
+        }
+    } else {
+        return null;
     }
 }
