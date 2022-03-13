@@ -39,8 +39,8 @@ async function read_csv(file_path) {
     })
 }
 
-async function get_article(nhm, url, category) {
-    const res = await fetch(url);
+async function get_article(nhm, uri, category) {
+    const res = await fetch(uri);
     const html = await res.text();
     const dom = new JSDOM(html);
     const document = dom.window.document;
@@ -55,13 +55,31 @@ async function get_article(nhm, url, category) {
     let body = items.reduce((prev, current) => {
         return prev + current;
     });
-    let cover = await parseOgpImage([...document.head.querySelectorAll('meta')]);
+
+    let thumbnail = await parseOgpImage([...document.head.querySelectorAll('meta')]);
+
+    let url = new URL(uri),
+        slug = "";
+    // redirect対応
+    if (url.pathname.split('/').length > 3) {
+        let slug_item = url.pathname.split('/');
+        for (let i = 2; i < slug_item.length; i++) {
+            slug = slug + "/" + slug_item[i]
+        }
+    } else {
+        slug = url.pathname.split('/')[2] === '' ? "/" + url.search : "/" + url.pathname.split('/')[2];
+    }
+
+    let db = await parseNotionDB(url.pathname.split('/')[1]);
+
     return {
-        "url": url,
+        "url": uri,
         "title": document.getElementsByTagName('title')[0].text,
         "body": nhm.translate(body),
-        "categories": category ? category.split(',') : null,
-        "cover": cover
+        "db": db,
+        "tags": category ? category.split(',') : null,
+        "thumbnail": thumbnail,
+        "slug": decodeURI(slug)
     };
 }
 
@@ -70,22 +88,26 @@ async function create_notion_page(notion, article) {
     try {
         let body = markdownToBlocks(article.body);
         body = await Promise.all(body.flatMap(async object => object.type === 'image' ? await uploadS3(object) : object));
-        if (article.categories) {
-            article.categories.map(category => tags.push({"name": category}));
+        if (article.tags) {
+            article.tags.map(tag => tags.push({"name": tag}));
+        }
+        let thumbnail = [];
+        if (article.thumbnail) {
+            thumbnail.push({
+                type: "external",
+                name: article.thumbnail,
+                external: {
+                    url: article.thumbnail
+                }
+            });
         }
 
         const response = await notion.pages.create({
             parent: {
-                database_id: process.env.NOTION_DB_TOKEN,
-            },
-            cover: {
-                type: "external",
-                external: {
-                    url: article.cover
-                }
+                database_id: article.db,
             },
             properties: {
-                Name: {
+                Page: {
                     title: [
                         {
                             text: {
@@ -94,9 +116,25 @@ async function create_notion_page(notion, article) {
                         },
                     ],
                 },
+                slug: {
+                    rich_text: [
+                        {
+                            type: "text",
+                            text: {
+                                "content": article.slug
+                            }
+                        },
+                    ]
+                },
                 Tags: {
                     multi_select: tags
-                }
+                },
+                published: {
+                    checkbox: true,
+                },
+                thumbnail: {
+                    files: thumbnail
+                },
             },
             children: body
         });
@@ -187,5 +225,21 @@ async function parseOgpImage(allMetaTag) {
         }
     } else {
         return null;
+    }
+}
+
+async function parseNotionDB(keyword) {
+    switch (keyword) {
+        case 'news':
+            return process.env.NOTION_NEWS_DB_TOKEN
+        case 'fieldwork':
+            return process.env.NOTION_DB_TOKEN
+        case 'activity':
+            return process.env.NOTION_ACTIVITY_DB_TOKEN
+        case 'voice':
+            return process.env.NOTION_VOICE_DB_TOKEN
+        default:
+            console.log(keyword);
+            return null;
     }
 }
