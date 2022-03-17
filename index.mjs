@@ -10,6 +10,7 @@ import {markdownToBlocks} from '@tryfabric/martian';
 import * as AWS from "@aws-sdk/client-s3";
 import {v4 as uuid} from 'uuid';
 import path from 'path';
+import {PutObjectCommand} from "@aws-sdk/client-s3";
 
 
 const {JSDOM} = jsdom;
@@ -71,13 +72,12 @@ async function get_article(nhm, uri, category) {
     }
 
     let db = await parseNotionDB(url.pathname.split('/')[1]);
-
     return {
         "url": uri,
         "title": document.getElementsByTagName('title')[0].text,
         "body": nhm.translate(body),
         "db": db,
-        "tags": category ? category.split(',') : null,
+        "tags": category ? category.split(', ') : null,
         "thumbnail": thumbnail,
         "slug": decodeURI(slug)
     };
@@ -100,6 +100,10 @@ async function create_notion_page(notion, article) {
                     url: article.thumbnail
                 }
             });
+        }
+
+        if (article.db === process.env.NOTION_NEWS_DB_TOKEN){
+            article.tags = article.tags.filter(tag => tag !== 'ニュース');
         }
 
         const response = await notion.pages.create({
@@ -173,16 +177,24 @@ async function uploadS3(block) {
         try {
             const response = await fetch(src)
             params['ContentType'] = response.headers.get("content-type") ?? undefined;
-            params['ContentLength'] = response.headers.get("content-length") != null
-                ? Number(response.headers.get("content-length"))
-                : undefined;
-            params['Body'] = response.body;
             params['Key'] = [process.env.S3_PREFIX, uuid(), path.extname(src)].join('');
-            await s3.putObject(params)
-                .then(() => {
+            if (response.headers.get("content-length") != null) {
+                params['Body'] = response.body;
+                params['ContentLength'] = Number(response.headers.get("content-length"));
+                await s3.putObject(params)
+                    .then(() => {
+                        block.image.external.url = [process.env.CLOUD_FRONT_URL, params['Key']].join('/');
+                    });
+                return block;
+            } else {
+                streamToBuffer(response.body)
+                    .then((buffer) => {
+                        params['Body'] = buffer;
+                        s3.send(new PutObjectCommand(params))
+                    }).then(() => {
                     block.image.external.url = [process.env.CLOUD_FRONT_URL, params['Key']].join('/');
                 });
-            return block;
+            }
         } catch (err) {
             console.error('ERROR:', err);
             return block;
@@ -208,19 +220,21 @@ async function parseOgpImage(allMetaTag) {
                 ? Number(response.headers.get("content-length"))
                 : undefined;
             params['Body'] = response.body;
-            params['Key'] = [process.env.S3_COVER_PREFIX, uuid(), path.extname(src)].join('');
+            if (path.extname(src).indexOf('?') !== -1) {
+                params['Key'] = [process.env.S3_COVER_PREFIX, uuid(), path.extname(src).split('?')[0]].join('');
+            } else {
+                params['Key'] = [process.env.S3_COVER_PREFIX, uuid(), path.extname(src)].join('');
+            }
             await s3.putObject(params)
                 .then(() => {
                     return [process.env.CLOUD_FRONT_URL, params['Key']].join('/');
                 }).catch(err => {
                     console.error('ERROR:', err);
-                    console.log('hay');
                     return null;
                 });
             return [process.env.CLOUD_FRONT_URL, params['Key']].join('/');
         } catch (err) {
             console.error('ERROR:', err);
-            console.log('hay');
             return null;
         }
     } else {
@@ -242,4 +256,13 @@ async function parseNotionDB(keyword) {
             console.log(keyword);
             return null;
     }
+}
+
+async function streamToBuffer(stream) {
+    return new Promise((resolve, reject) => {
+        const _buf = [];
+        stream.on('data', (chunk) => _buf.push(chunk));
+        stream.on('end', () => resolve(Buffer.concat(_buf)));
+        stream.on('error', (err) => reject(err));
+    });
 }
