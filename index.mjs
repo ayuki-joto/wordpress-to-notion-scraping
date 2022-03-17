@@ -89,6 +89,9 @@ async function create_notion_page(notion, article) {
         let body = markdownToBlocks(article.body);
         body = await Promise.all(body.flatMap(async object => object.type === 'image' ? await uploadS3(object) : object));
         if (article.tags) {
+            if (article.db === process.env.NOTION_NEWS_DB_TOKEN){
+                article.tags = article.tags.filter(tag => tag !== 'ニュース');
+            }
             article.tags.map(tag => tags.push({"name": tag}));
         }
         let thumbnail = [];
@@ -101,11 +104,6 @@ async function create_notion_page(notion, article) {
                 }
             });
         }
-
-        if (article.db === process.env.NOTION_NEWS_DB_TOKEN){
-            article.tags = article.tags.filter(tag => tag !== 'ニュース');
-        }
-
         const response = await notion.pages.create({
             parent: {
                 database_id: article.db,
