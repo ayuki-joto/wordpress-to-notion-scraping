@@ -11,7 +11,7 @@ import * as AWS from "@aws-sdk/client-s3";
 import {v4 as uuid} from 'uuid';
 import path from 'path';
 import {PutObjectCommand} from "@aws-sdk/client-s3";
-
+import dayjs from 'dayjs';
 
 const {JSDOM} = jsdom;
 const {Client} = client;
@@ -25,10 +25,34 @@ const s3 = new AWS.S3({
 
 (async () => {
     const notion = new Client({auth: process.env.NOTION_TOKEN});
-    const nhm = new NodeHtmlMarkdown({keepDataImages: true});
+    const nhm = new NodeHtmlMarkdown({
+            keepDataImages: true,
+        },
+        {
+            iframe: {
+                preserveIfEmpty: true,
+                postprocess: ({node, options}) => {
+                    let src = node.getAttribute('src') || '';
+                    if (!src || (!options.keepDataImages && /^data:/i.test(src)))
+                        return {ignore: true};
+                    if (!src.includes('https:')) {
+                        src = 'https:' + src
+                    }
+                    const alt = node.getAttribute('alt') || '';
+                    return `![${alt}](${src})`
+                }
+            }
+        });
     const files = await read_csv(process.argv[2]);
-    const articles = await Promise.all(files.map(async file => await get_article(nhm, file['URLs'], file['Categories'])));
-    articles.map(async article => !!article ? await create_notion_page(notion, article) : null);
+    const type = process.argv[3];
+    const articles = await Promise.all(files.map(async file => await get_article(nhm, file['URLs'], file['Categories'], type)));
+    if (type === 'news') {
+        articles.map(async article => !!article ? await create_news_notion_page(notion, article) : null);
+    } else if (type === 'voice') {
+        articles.map(async article => !!article ? await create_voice_notion_page(notion, article) : null);
+    } else if (type === 'activity') {
+        articles.map(async article => !!article ? await create_activity_notion_page(notion, article) : null);
+    }
 })();
 
 
@@ -40,7 +64,7 @@ async function read_csv(file_path) {
     })
 }
 
-async function get_article(nhm, uri, category) {
+async function get_article(nhm, uri, category, type) {
     const res = await fetch(uri);
     const html = await res.text();
     const dom = new JSDOM(html);
@@ -48,50 +72,174 @@ async function get_article(nhm, uri, category) {
     const nodes = document.getElementsByTagName('article');
     const children = nodes[0].children;
     const items = Array.from(children, element => element.outerHTML);
-
     if (items[0].indexOf("NOT FOUND") !== -1) {
         return null
     }
-
     let body = items.reduce((prev, current) => {
         return prev + current;
     });
-
+    let slug = null;
+    if (body.includes('プレスリリース')) {
+        const mainNode = document.getElementsByTagName('main')
+        const mainChildren = mainNode[0].children;
+        const script = mainChildren[0].outerHTML;
+        slug = script.split('"')[1];
+        body = '';
+    }
     let thumbnail = await parseOgpImage([...document.head.querySelectorAll('meta')]);
-
-    let url = new URL(uri),
-        slug = "";
-    // redirect対応
-    if (url.pathname.split('/').length > 3) {
-        let slug_item = url.pathname.split('/');
-        for (let i = 2; i < slug_item.length; i++) {
-            slug = slug + "/" + slug_item[i]
-        }
+    let published_at = '';
+    if (type !== 'activity') {
+        published_at = dayjs(children[1].innerHTML.match(/\d{4}.\d{1,2}.\d{1,2}/)[0], 'YYYY.MM.DD').format();
     } else {
-        slug = url.pathname.split('/')[2] === '' ? "/" + url.search : "/" + url.pathname.split('/')[2];
+        published_at = dayjs().format();
     }
 
-    let db = await parseNotionDB(url.pathname.split('/')[1]);
     return {
         "url": uri,
         "title": document.getElementsByTagName('title')[0].text,
         "body": nhm.translate(body),
-        "db": db,
         "tags": category ? category.split(', ') : null,
         "thumbnail": thumbnail,
-        "slug": decodeURI(slug)
+        "published_at": published_at,
+        "slug": slug === null ? decodeURI(getSlugUseType(uri, type)) : slug
     };
 }
 
-async function create_notion_page(notion, article) {
+function getSlugUseType(uri, type) {
+    if (type === 'voice') {
+        return uri.split('/').pop().split('=').pop();
+    }
+    return uri.split('/').pop();
+}
+
+async function create_voice_notion_page(notion, article) {
+    try {
+        let body = markdownToBlocks(article.body);
+        body = await Promise.all(body.flatMap(async object => object.type === 'image' ? await uploadS3(object) : object));
+        let thumbnail = [];
+        if (article.thumbnail) {
+            thumbnail.push({
+                type: "external",
+                name: article.thumbnail,
+                external: {
+                    url: article.thumbnail
+                }
+            });
+        }
+        body = body.filter(b => b !== null)
+        await notion.pages.create({
+            parent: {
+                database_id: process.env.NOTION_VOICE_DB_TOKEN,
+            },
+            properties: {
+                Page: {
+                    title: [
+                        {
+                            text: {
+                                content: article.title,
+                            },
+                        },
+                    ],
+                },
+                slug: {
+                    rich_text: [
+                        {
+                            type: "text",
+                            text: {
+                                "content": article.slug
+                            }
+                        },
+                    ]
+                },
+                published: {
+                    checkbox: true,
+                },
+                published_at: {
+                    date: {
+                        "start": article.published_at,
+                        "end": null
+                    },
+                },
+                thumbnail: {
+                    files: thumbnail
+                },
+            },
+            children: body
+        });
+    } catch (exception) {
+        console.log(article.url);
+        console.log(exception);
+    }
+}
+
+async function create_activity_notion_page(notion, article) {
+    try {
+        let body = markdownToBlocks(article.body);
+        body = await Promise.all(body.flatMap(async object => object.type === 'image' ? await uploadS3(object) : object));
+        body = body.filter(b => b !== null)
+        let thumbnail = [];
+        if (article.thumbnail) {
+            thumbnail.push({
+                type: "external",
+                name: article.thumbnail,
+                external: {
+                    url: article.thumbnail
+                }
+            });
+        }
+        await notion.pages.create({
+            parent: {
+                database_id: process.env.NOTION_ACTIVITY_DB_TOKEN,
+            },
+            properties: {
+                Page: {
+                    title: [
+                        {
+                            text: {
+                                content: article.title,
+                            },
+                        },
+                    ],
+                },
+                slug: {
+                    rich_text: [
+                        {
+                            type: "text",
+                            text: {
+                                "content": article.slug
+                            }
+                        },
+                    ]
+                },
+                published: {
+                    checkbox: true,
+                },
+                published_at: {
+                    date: {
+                        "start": article.published_at,
+                        "end": null
+                    },
+                },
+                thumbnail: {
+                    files: thumbnail
+                },
+            },
+            children: body
+        });
+    } catch (exception) {
+        console.log(article.url);
+        console.log(exception);
+    }
+}
+
+async function create_news_notion_page(notion, article) {
     let tags = [];
     try {
         let body = markdownToBlocks(article.body);
         body = await Promise.all(body.flatMap(async object => object.type === 'image' ? await uploadS3(object) : object));
+        body = body.filter(b => b !== null)
         if (article.tags) {
-            if (article.db === process.env.NOTION_NEWS_DB_TOKEN){
-                article.tags = article.tags.filter(tag => tag !== 'ニュース');
-            }
+            article.tags = article.tags.filter(tag => tag !== 'ニュース');
             article.tags.map(tag => tags.push({"name": tag}));
         }
         let thumbnail = [];
@@ -104,9 +252,9 @@ async function create_notion_page(notion, article) {
                 }
             });
         }
-        const response = await notion.pages.create({
+        await notion.pages.create({
             parent: {
-                database_id: article.db,
+                database_id: process.env.NOTION_NEWS_DB_TOKEN,
             },
             properties: {
                 Page: {
@@ -134,6 +282,12 @@ async function create_notion_page(notion, article) {
                 published: {
                     checkbox: true,
                 },
+                published_at: {
+                    date: {
+                        "start": article.published_at,
+                        "end": null
+                    },
+                },
                 thumbnail: {
                     files: thumbnail
                 },
@@ -149,11 +303,17 @@ async function create_notion_page(notion, article) {
 async function uploadS3(block) {
     const src = block.image.external.url;
     if (!src) return block;
-
+    if (src.includes('embed') || src.includes('speakerdeck.com/player')) {
+        return {
+            "type": "embed",
+            "embed": {
+                "url": src
+            }
+        }
+    }
     const params = {
         Bucket: process.env.S3_BUCKET_NAME,
     }
-
     if (/^data:/i.test(src)) {
         const fileData = src.replace(/^data:\w+\/\w+;base64,/, '')
         const decodedFile = Buffer.from(fileData, 'base64')
@@ -174,28 +334,42 @@ async function uploadS3(block) {
     } else {
         try {
             const response = await fetch(src)
+            if (response.status === 404) {
+                return null
+            }
             params['ContentType'] = response.headers.get("content-type") ?? undefined;
-            params['Key'] = [process.env.S3_PREFIX, uuid(), path.extname(src)].join('');
+            if (params['ContentType'] === 'text/plain') {
+                return null
+            }
+            if (path.extname(src) === '' && params['ContentType'] !== undefined) {
+                params['Key'] = [process.env.S3_PREFIX, uuid(), '.' ,params['ContentType'].split('/').pop()].join('');
+            } else {
+                params['Key'] = [process.env.S3_PREFIX, uuid(), path.extname(src)].join('');
+            }
             if (response.headers.get("content-length") != null) {
                 params['Body'] = response.body;
                 params['ContentLength'] = Number(response.headers.get("content-length"));
-                await s3.putObject(params)
+                block = await s3.putObject(params)
                     .then(() => {
                         block.image.external.url = [process.env.CLOUD_FRONT_URL, params['Key']].join('/');
+                    }).then(() => {
+                        return block;
                     });
-                return block;
+                return block
             } else {
-                streamToBuffer(response.body)
+                await streamToBuffer(response.body)
                     .then((buffer) => {
                         params['Body'] = buffer;
                         s3.send(new PutObjectCommand(params))
                     }).then(() => {
-                    block.image.external.url = [process.env.CLOUD_FRONT_URL, params['Key']].join('/');
-                });
+                        block.image.external.url = [process.env.CLOUD_FRONT_URL, params['Key']].join('/');
+                    }).then(() => {
+                        return block;
+                    });
             }
         } catch (err) {
             console.error('ERROR:', err);
-            return block;
+            return block
         }
     }
 }
@@ -237,22 +411,6 @@ async function parseOgpImage(allMetaTag) {
         }
     } else {
         return null;
-    }
-}
-
-async function parseNotionDB(keyword) {
-    switch (keyword) {
-        case 'news':
-            return process.env.NOTION_NEWS_DB_TOKEN
-        case 'fieldwork':
-            return process.env.NOTION_DB_TOKEN
-        case 'activity':
-            return process.env.NOTION_ACTIVITY_DB_TOKEN
-        case 'voice':
-            return process.env.NOTION_VOICE_DB_TOKEN
-        default:
-            console.log(keyword);
-            return null;
     }
 }
 

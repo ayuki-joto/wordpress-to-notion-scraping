@@ -11,16 +11,17 @@
   "license": "ISC",
   "devDependencies": {
     "jsdom": "^19.0.0",
-    "node-fetch": "^3.2.2"
+    "node-fetch": "^3.2.3"
   },
   "dependencies": {
-    "@aws-sdk/client-s3": "^3.53.1",
-    "@notionhq/client": "^1.0.2",
-    "@tryfabric/martian": "^1.1.1",
+    "@aws-sdk/client-s3": "^3.76.0",
+    "@notionhq/client": "^1.0.4",
+    "@tryfabric/martian": "^1.2.0",
     "csv-parse": "^5.0.4",
+    "dayjs": "^1.11.1",
     "dotenv": "^16.0.0",
-    "fs-extra": "^10.0.1",
-    "node-html-markdown": "^1.1.3",
+    "fs-extra": "^10.1.0",
+    "node-html-markdown": "^1.2.0",
     "uuid": "^8.3.2"
   }
 }
