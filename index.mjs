@@ -301,7 +301,7 @@ async function create_news_notion_page(notion, article) {
 }
 
 async function uploadS3(block) {
-    const src = block.image.external.url;
+    let src = block.image.external.url;
     if (!src) return block;
     if (src.includes('embed') || src.includes('speakerdeck.com/player')) {
         return {
@@ -333,6 +333,12 @@ async function uploadS3(block) {
         }
     } else {
         try {
+            if (new URL(src).host === 'www.old.code4japan.org') {
+                let tem_url  = new URL(src)
+                tem_url.hostname = 'old.code4japan.org'
+                src = tem_url.href
+            }
+
             const response = await fetch(src)
             if (response.status === 404) {
                 return null
@@ -381,11 +387,16 @@ async function parseOgpImage(allMetaTag) {
             return !(!property || property !== 'og:image');
         });
     if (ogp[0]) {
-        const src = ogp[0].getAttribute("content");
+        let src = ogp[0].getAttribute("content");
         const params = {
             Bucket: process.env.S3_BUCKET_NAME,
         }
         try {
+            if (new URL(src).host === 'www.old.code4japan.org') {
+                 let tem_url  = new URL(src)
+                tem_url.hostname = 'old.code4japan.org'
+                src = tem_url.href
+            }
             const response = await fetch(src)
             params['ContentType'] = response.headers.get("content-type") ?? undefined;
             params['ContentLength'] = response.headers.get("content-length") != null
